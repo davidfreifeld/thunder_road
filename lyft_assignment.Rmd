@@ -1,0 +1,147 @@
+---
+title: "Driver Lifetime Value - Lyft"
+author: "David Freifeld"
+date: "Thursday, August 06, 2015"
+output: html_document
+---
+
+## Synopsis
+
+## Preprocessing the Data
+
+I start by reading the data into R and doing some minor formatting. Then I convert the UNIX timestamps to actual dates, and order the rides chronologically within each driver id.
+
+```{r warning=FALSE}
+library(ggplot2)
+library(plyr)
+library(scales)
+
+# first read in the data file 
+setwd("C:/Users/David/workspace/lyft/")
+lyftData <- read.csv('lyft_data_1.csv')
+colnames(lyftData) <- c('id', 'donation', 'timestamp')
+lyftData$id <- factor(lyftData$id)
+
+# convert the UNIX timestamps (will assume PST because Lyft is in CA)
+lyftData$timestamp <- as.POSIXct(lyftData$timestamp, 
+    origin='1970-01-01', tz='US/Pacific')
+lyftData$date <- as.Date(lyftData$timestamp, tz = 'US/Pacific')
+
+# order each driver's data by timestamp
+driverSplits <- split(lyftData, lyftData$id)
+lyftDataList <- lapply(driverSplits, function(x) {
+	x[order(x$timestamp),]
+})
+lyftData <- ldply(lyftDataList)
+lyftData$.id <- NULL
+```
+
+## Exploratory Analysis
+
+First let's explore the average donation amount received by each driver. I start by looking at the first 25 drivers only, in order to fit all of the boxplots on a single graph:
+
+```{r}
+ggplot(lyftData[lyftData$id %in% as.character(0:25),], aes(x = id, y = donation, fill = id)) +
+    geom_boxplot() + 
+    xlab("Driver ID") + 
+    ylab("Donation Amount ($)") + 
+    ggtitle("Distribution of Donation Amount by Driver") +
+    theme(legend.position="none")
+```
+
+This plot shows that the distributions of donation amounts for each of the first 25 drivers are very similar. The median is $9 or $10 in every case. It turns out that this is true for all 98 drivers. (The plot for all 98 drivers looks identical to the above plot, and therefore I am leaving it out for visual purposes). 
+
+Because the donation amount does not differ from driver to driver, we can use the average donation amount later in the calculation of driver lifetime value:
+
+```{r}
+avgDonation <- mean(lyftData$donation)
+round(avgDonation, 2)
+```
+
+Next I look at the distributions of rides over time for each user. (Again, I am only using 25 drivers for illustrative purposes. The full plot of 98 drivers looks similar).
+
+```{r warning=FALSE}
+ggplot(lyftData[lyftData$id %in% as.character(26:50),], aes(x = timestamp)) +
+	geom_histogram() +
+	facet_wrap(~ id) + 
+    ylab("Number of Rides") +
+    xlab("Time") + 
+    ggtitle("Distributions of Rides Over Time by Driver") + 
+    scale_x_datetime(breaks = date_breaks("1 month"), labels=date_format("%m/%d"), 
+                     limits=c(min(lyftData$timestamp), max(lyftData$timestamp)))
+```
+
+
+
+```{r}
+# First get some summary statistics related to how long drivers
+# keep driving
+lastRideRecorded <- max(lyftData$date)
+
+driverSummary <- ddply(lyftData, .(id), summarize,
+	numRides = length(date),
+	firstRide = date[1],
+	lastRide = date[numRides],
+	duration = as.numeric(lastRide - firstRide) + 1,
+	stillActive = as.numeric(lastRideRecorded - lastRide) <= 7,
+	uniqueDays = length(unique(date)),
+	fractionWorked = uniqueDays / duration,
+	ridesPerActiveDay = numRides/uniqueDays,
+	maxBreak = as.numeric(max(date[2:numRides] - date[1:(numRides-1)])) - 1
+)
+rownames(driverSummary) <- driverSummary$id
+activeDrivers <- driverSummary$stillActive
+numStillActive <- sum(activeDrivers)
+numDrivers <- nrow(driverSummary)
+numDrivers
+
+ggplot(driverSummary, aes(x = duration, y = fractionWorked)) + 
+	geom_point(aes(fill = stillActive, size = ridesPerActiveDay), 
+		position = 'jitter', shape = 21) +
+	scale_fill_brewer(palette="Set1")
+
+```
+
+## Estimating Expected Driver Lifetime
+
+```{r}
+t <- 1:83
+activeAtT <- sapply(t, function(x) {
+    (sum(driverSummary[!activeDrivers, "duration"] > x) + numStillActive) / 
+		numDrivers
+})
+survivalData <- data.frame(t = t, activeAtT = activeAtT)
+
+ggplot(survivalData, aes(x = t, y = log(activeAtT))) + 
+	geom_point() + 
+	stat_smooth(method = "lm", formula = y ~ x - 1) + 
+	ylim(-1, 0)
+
+mod <- lm(log(activeAtT) ~ t - 1, data = survivalData)
+summary(mod)
+
+lambda <- -mod$coef[[1]]
+expectedLife <- 1 / lambda
+```
+
+## Calculating a Driver Lifetime Value
+
+```{r}
+recordedRides <- nrow(lyftData)
+recordedRides
+
+aRidesPerActiveDay <- mean(driverSummary[activeDrivers, "ridesPerActiveDay"])
+aFractionWorked <- mean(driverSummary[activeDrivers, "fractionWorked"])
+futureRides <- aRidesPerActiveDay * aFractionWorked * expectedLife * numStillActive
+futureRides
+
+lyftRate <- 0.2
+
+avgRides <- (recordedRides + futureRides) / numDrivers
+avgRides
+
+DLV <- avgRides * avgDonation * lyftRate
+DLV
+```
+
+## Conclusion
