@@ -2,10 +2,18 @@
 title: "Driver Lifetime Value - Lyft"
 author: "David Freifeld"
 date: "Thursday, August 06, 2015"
-output: html_document
+output: pdf_document
 ---
 
 ## Synopsis
+
+For a ridesharing company, estimating a Driver Lifetime Value, much like a Customer Lifetime Value, can be extremely useful. The expected DLV tells the company how much an additional driver is worth. The company can then decide, among other things, how much to spend on driver marketing campaigns, how much to offer for a driver referral program, and how many drivers they ideally would like to add. 
+
+When calculating a DLV, the value should be the *marginal* increase in revenue from adding another driver in a specific city. In the real world, this value is not necessarily the same as the total revenue that a driver brings in. If rider demand is not high enough, then an additional driver might just be giving rides that could have been serviced by already existing Lyft drivers, and the added value from the additional driver could be close to zero. There is a complex interplay of variables that include, but are not limited to, Lyft's driver saturation in a given market, the current average wait times, and the ever-changing rider demand, and network effects.
+
+For this study, given the data, I will assume that each ride that a driver gives is an additional ride for Lyft, and therefore that a driver's value is equal to the number of rides he gives times the average donation he receives times Lyft's portion, which is 20%. I believe this assumption is reasonable because, at this point in time, adding drivers leads to shorter wait times which can entice riders away from competitors. Therefore I leave the analysis of the other aforementioned variables to another study. I will also ignore the costs associated with a new driver, such as the time and money required to interview him as well as the cost to insure him.
+
+In this study I determine that there are two main "types" of drivers - those that are still active and those that tried driving for a short period but then stopped. These drivers exhibit different characteristics, and I therefore model them separately. The analysis yields a Driver Lifetime Value of about $2,000.
 
 ## Preprocessing the Data
 
@@ -49,7 +57,7 @@ ggplot(lyftData[lyftData$id %in% as.character(0:25),], aes(x = id, y = donation,
     theme(legend.position="none")
 ```
 
-This plot shows that the distributions of donation amounts for each of the first 25 drivers are very similar. The median is $9 or $10 in every case. It turns out that this is true for all 98 drivers. (The plot for all 98 drivers looks identical to the above plot, and therefore I am leaving it out for visual purposes). 
+This plot shows that the distributions of donation amounts for each of the first 25 drivers are very similar. The median is $9 or $10 in every case. It turns out that this is true for all 98 drivers. (The plot for all 98 drivers looks like a more crammed version of the above plot, and therefore I am leaving it out for visual purposes). 
 
 Because the donation amount does not differ from driver to driver, we can use the average donation amount later in the calculation of driver lifetime value:
 
@@ -62,7 +70,7 @@ Next I look at the distributions of rides over time for each user. (Again, I am 
 
 ```{r warning=FALSE}
 ggplot(lyftData[lyftData$id %in% as.character(26:50),], aes(x = timestamp)) +
-	geom_histogram() +
+	geom_histogram(fill = "magenta1") +
 	facet_wrap(~ id) + 
     ylab("Number of Rides") +
     xlab("Time") + 
@@ -71,13 +79,25 @@ ggplot(lyftData[lyftData$id %in% as.character(26:50),], aes(x = timestamp)) +
                      limits=c(min(lyftData$timestamp), max(lyftData$timestamp)))
 ```
 
+It is apparent from this sample that the behavior is heterogeneous among drivers. Some drivers give many rides on days where they are active, some give relatively few. Some drivers drive every day, others take days off. One of the most important features for the purpose of this analysis, however, is that some drivers appear to give up on driving altogether, sometimes after a short stint as a Lyft driver. Other drivers have given rides right up to the last day in the data set (March 24, 2001). 
 
+To quantify these characteristics, I create a summary data frame on a per-driver basis. The summary statistics I calculate are:
+
+- **numRides** - the total number of rides given by the driver 
+- **firstRide** - the date of the driver's first ride in the dataset
+- **lastRide** - the date of the driver's last ride in the dataset
+- **duration** - the time between the driver's last ride and first ride
+- **stillActive** - whether or not the driver has driven within one week of the last date in the dataset. If so, I assume that this driver is still driving with Lyft
+- **uniqueDays** - number of different days the driver gave rides
+- **fractionWorked** - the proportion of days of the driver's time with Lyft that she gave rides
+- **ridesPerActiveDay** - average number of rides given on days where the driver was driving
+- **maxBreak** - the longest break (in days) that the driver took from driving
 
 ```{r}
-# First get some summary statistics related to how long drivers
-# keep driving
+# this is the last date in the dataset
 lastRideRecorded <- max(lyftData$date)
 
+# create a data frame of summary statistics by driver
 driverSummary <- ddply(lyftData, .(id), summarize,
 	numRides = length(date),
 	firstRide = date[1],
@@ -90,19 +110,52 @@ driverSummary <- ddply(lyftData, .(id), summarize,
 	maxBreak = as.numeric(max(date[2:numRides] - date[1:(numRides-1)])) - 1
 )
 rownames(driverSummary) <- driverSummary$id
+
+# get some other values about the population of drivers
 activeDrivers <- driverSummary$stillActive
 numStillActive <- sum(activeDrivers)
 numDrivers <- nrow(driverSummary)
-numDrivers
 
+head(driverSummary)
+```
+
+Now I take a look at a scatterplot that displays four different summary statistics, via the two axes, the size, and the color of the points: 
+
+```{r warning=FALSE}
 ggplot(driverSummary, aes(x = duration, y = fractionWorked)) + 
 	geom_point(aes(fill = stillActive, size = ridesPerActiveDay), 
 		position = 'jitter', shape = 21) +
-	scale_fill_brewer(palette="Set1")
-
+	scale_fill_brewer(palette="Set1", name = 'Still Active?', labels=c("Not Active", "Active")) + 
+    xlab('Duration (Days)') + 
+    ylab('Fraction of Days Worked') + 
+    ggtitle('Driver Summary') +
+    scale_size_continuous(name = 'Rides Per Active Day')
+    
 ```
 
+The takeaway from this graph is that the drivers that I have classified as still active (in blue) tend to have different characteristics than those drivers that have given up driving (in red). In general they give more rides per day that they work, and also work more days. The duration of their time as a Lyft driver is also longer, as we would expect. Given this information, I decided to split up the drivers into these two groups before the calculation of average expected rides per driver. 
+
 ## Estimating Expected Driver Lifetime
+
+For drivers that are not still active, we have the entire set of ride information. For those that are still active, however, we expect that they will give (hopefully many) more rides in the future. I choose to model the expected driver lifetime (the total number of days between a driver's first and last ride) using an exponential distribution. This is a common distribution to use when modeling real world phenomena that have an unknown end date, such as the time until a lightbulb burns out or a satirical news host calls it quits. (We'll miss you, Jon Stewart!) The exponential distribution's cumulative distribution function, which defines it, is
+
+$$
+\Pr\left( T < t \right)= F_T(t) = 1 - e^{-\lambda t}
+$$
+
+Where $\lambda$ is referred to as the "rate." We use the the distribution's survivor function, which is equal to one minus the c.d.f. 
+
+$$
+\Pr\left( T > t \right)= S_T(t) = e^{-\lambda t}
+$$
+
+The exponential distribution's has a useful property in that it is "memoryless." This means that for all times $t$, if failure hasn't occurred yet, the distribution for failure in the future from time $t$ is the same. i.e. if a driver hasn't quit after one month of driving, the distribution of when we expect him to quit driving is identical to a driver who has been driving for one year. This can be expressed mathematically (via [Wikipedia](https://en.wikipedia.org/wiki/Exponential_distribution)) as 
+
+$$
+\Pr \left (T > s + t | T > s \right ) = \Pr(T > t), \qquad \forall s, t \ge 0.
+$$
+
+I fit an exponential distribution to this data as follows: the independent variable is the number of days since a driver has started driving, and goes from 1 to 83 (the maximum duration in the dataset). The dependent variable is the proportion of drivers who have not yet quit driving by that day. So I am modeling $S_T(t)$. I can do this using a regular linear regression if I first take the natural log of the dependent variable. The negative of the slope of the regression line will be our estimate for $\lambda$. 
 
 ```{r}
 t <- 1:83
@@ -113,18 +166,30 @@ activeAtT <- sapply(t, function(x) {
 survivalData <- data.frame(t = t, activeAtT = activeAtT)
 
 ggplot(survivalData, aes(x = t, y = log(activeAtT))) + 
-	geom_point() + 
+	geom_point(color = "magenta1") + 
 	stat_smooth(method = "lm", formula = y ~ x - 1) + 
-	ylim(-1, 0)
+	ylim(-1, 0) + 
+    xlab('Time t (Days)') + 
+    ylab('log(Proportion of Drivers Still Driving)') + 
+    ggtitle('Fitting a Survivor Function to Observed Driver Durations')
 
 mod <- lm(log(activeAtT) ~ t - 1, data = survivalData)
 summary(mod)
-
-lambda <- -mod$coef[[1]]
-expectedLife <- 1 / lambda
 ```
 
+So the slope of the regression line is about -0.0071. Note that a linear regression without taking the natural log of the dependent variable would also fit this data well. However, this would imply that there is no probability of a driver staying a driver for a very long time, because the regression line would eventually intersect the x axis. The exponential distribution better represents the real-world phenomenon, so I choose to stick with the log-linear regression. 
+
+```{r}
+lambda <- -mod$coef[[1]]
+expectedLife <- 1 / lambda
+round(expectedLife, 1)
+```
+
+So the expected driver lifetime is about 140 days. Because of the memoryless property of the exponential distribution, this means that the *future* expected lifetime for drivers who are still active is *another* 140 days. 
+
 ## Calculating a Driver Lifetime Value
+
+My approach to calculating DLV is this: I start with all of the rides recorded in the dataset. I then add to that the number of rides I expect the active drivers to give in the future, using average productivity metrics from the active driver population (which includes 55 of the 98 drivers). I add the known rides to the future expected rides, multiply by the average donation amount and the percentage that Lyft receives (20%), and finally divide by the number of drivers in the data set. 
 
 ```{r}
 recordedRides <- nrow(lyftData)
@@ -133,15 +198,21 @@ recordedRides
 aRidesPerActiveDay <- mean(driverSummary[activeDrivers, "ridesPerActiveDay"])
 aFractionWorked <- mean(driverSummary[activeDrivers, "fractionWorked"])
 futureRides <- aRidesPerActiveDay * aFractionWorked * expectedLife * numStillActive
-futureRides
+round(futureRides, 0)
+```
+
+Note that it might seem overly optimistic to predict more rides by the active drivers in the future than all of the rides in our data set. However, the dataset is only for a small period of time (less than three months), and we must extrapolate. Also, a number of the drivers in this dataset, including ones who are no longer active, might have been driving for a period of time *before* the dataset begins. The optimistic extrapolation can be thought of as taking this into account.
+
+```{r}
+avgRides <- (recordedRides + futureRides) / numDrivers
+round(avgRides, 0)
 
 lyftRate <- 0.2
 
-avgRides <- (recordedRides + futureRides) / numDrivers
-avgRides
-
 DLV <- avgRides * avgDonation * lyftRate
-DLV
+round(DLV, 0)
 ```
 
-## Conclusion
+The final calculated Driver Lifetime Value to the company is about $2,000.
+
+
